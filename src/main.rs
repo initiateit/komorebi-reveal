@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 use std::ptr::{addr_of, addr_of_mut};
+use std::time::Instant;
 
 use std::result::Result::Ok;
 
@@ -73,25 +74,80 @@ struct AppState {
     text_anim_step: u32,
     text_anim_active: bool,
     current_alpha: u8,
+    refresh_rate_hz: u32,
+    last_frame_time: Instant,
 }
 
 impl AppState {
-    fn new(screen_w: i32, screen_h: i32) -> Self {
-        Self {
-            canvas: Canvas::new(screen_w, screen_h),
-            thumbnails: Vec::new(),
-            visible: false,
-            canvas_hwnd: HWND::default(),
-            drag_moved: false,
-            click_target: None,
-            bg_bitmap: HBITMAP::default(),
-            anim_step: 0,
-            anim_active: false,
-            text_anim_step: 0,
-            text_anim_active: false,
-            current_alpha: 0,
+        fn new(screen_w: i32, screen_h: i32) -> Self {
+            let refresh_rate = Self::detect_refresh_rate();
+            log_debug(&format!("Detected refresh rate: {}Hz", refresh_rate));
+            
+            Self {
+                canvas: Canvas::new(screen_w, screen_h),
+                thumbnails: Vec::new(),
+                visible: false,
+                canvas_hwnd: HWND::default(),
+                drag_moved: false,
+                click_target: None,
+                bg_bitmap: HBITMAP::default(),
+                anim_step: 0,
+                anim_active: false,
+                text_anim_step: 0,
+                text_anim_active: false,
+                current_alpha: 0,
+                refresh_rate_hz: refresh_rate,
+                last_frame_time: Instant::now(),
+            }
         }
-    }
+    
+        fn detect_refresh_rate() -> u32 {
+            unsafe {
+                let hdc = GetDC(HWND::default());
+                let refresh_rate = GetDeviceCaps(hdc, VREFRESH);
+                let _ = ReleaseDC(HWND::default(), hdc);
+                refresh_rate.max(60) as u32  // Minimum 60Hz
+            }
+        }
+    
+        fn is_high_refresh_rate(&self) -> bool {
+            self.refresh_rate_hz >= 120
+        }
+    
+            fn frame_budget_ms(&self) -> f64 {
+                1000.0 / self.refresh_rate_hz as f64
+            }
+        
+            fn should_render_frame(&self) -> bool {
+                // Always render during animations
+                if self.anim_active || self.text_anim_active {
+                    return true;
+                }
+                
+                // At high refresh rates, skip static frames
+                if self.is_high_refresh_rate() {
+                    false  // Only render when something changes
+                } else {
+                    true   // 60Hz: render every frame
+                }
+            }
+            
+            fn update_frame_timing(&mut self) {
+                let now = Instant::now();
+                let elapsed = now.duration_since(self.last_frame_time).as_secs_f64();
+                let expected_frame_time = 1.0 / self.refresh_rate_hz as f64;
+                
+                // Log if we're missing frame budget
+                if elapsed > expected_frame_time {
+                    log_debug(&format!(
+                        "Frame over budget: {:.2}ms vs {:.2}ms budget",
+                        elapsed * 1000.0,
+                        expected_frame_time * 1000.0
+                    ));
+                }
+                
+                self.last_frame_time = now;
+            }
 
     fn refresh(&mut self) {
         self.thumbnails.clear();
@@ -109,13 +165,14 @@ impl AppState {
             match Thumbnail::register(self.canvas_hwnd, winfo.hwnd) {
                 Ok(thumb) => {
                     let idx = self.thumbnails.len();
-                    source_infos.push(SourceInfo {
-                        thumb_index: idx,
-                        width: thumb.source_width,
-                        height: thumb.source_height,
-                        title: winfo.title.clone(),
-                        icon: winfo.icon,
-                    });
+                                        source_infos.push(SourceInfo {
+                                            thumb_index: idx,
+                                            width: thumb.source_width,
+                                            height: thumb.source_height,
+                                            title: winfo.title.clone(),
+                                            title_utf16: winfo.title.encode_utf16().chain(std::iter::once(0)).collect(),
+                                            icon: winfo.icon,
+                                        });
                     self.thumbnails.push(thumb);
                 }
                 Err(e) => {
@@ -472,6 +529,8 @@ unsafe extern "system" fn wndproc(
             let hdc = BeginPaint(hwnd, &mut ps);
 
             with_state(|s| {
+                if s.should_render_frame() {
+                    s.update_frame_timing();
                 // Use double buffering: draw to off-screen bitmap first
                 let hdc_buffer = CreateCompatibleDC(hdc);
                 let hbm_buffer = CreateCompatibleBitmap(hdc, s.canvas.screen_w, s.canvas.screen_h);
@@ -664,7 +723,7 @@ unsafe extern "system" fn wndproc(
                                 let icon_size = 20;
                                 let icon_spacing = 6;
 
-                                let tw: Vec<u16> = cw.title.encode_utf16().chain(std::iter::once(0)).collect();
+                                                                let tw = &cw.title_utf16;
                                 
                                 let mut bounding_box = RectF::default();
                                 let _ = GdipMeasureString(
@@ -813,6 +872,7 @@ unsafe extern "system" fn wndproc(
                 SelectObject(hdc_buffer, _old_buffer);
                 let _ = DeleteObject(hbm_buffer);
                 let _ = DeleteDC(hdc_buffer);
+                }
             });
 
             let _ = EndPaint(hwnd, &ps);

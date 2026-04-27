@@ -7,25 +7,10 @@ use crate::state::SavedCanvasState;
 
 /// Represents a window's position and size on the canvas (in canvas-space coordinates).
 #[derive(Debug, Clone)]
-pub struct CanvasWindow {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub thumb_index: usize,
-    pub title: String,
-    pub icon: HICON,
-    pub dragging: bool,
-}
+pub struct CanvasWindow { pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub thumb_index: usize, pub title: String, pub title_utf16: Vec<u16>, pub icon: HICON, pub dragging: bool, }
 
 /// Source window info for layout computation.
-pub struct SourceInfo {
-    pub thumb_index: usize,
-    pub width: i32,
-    pub height: i32,
-    pub title: String,
-    pub icon: HICON,
-}
+pub struct SourceInfo { pub thumb_index: usize, pub width: i32, pub height: i32, pub title: String, pub title_utf16: Vec<u16>, pub icon: HICON, }
 
 /// The canvas state.
 pub struct Canvas {
@@ -112,16 +97,17 @@ impl Canvas {
             let x = start_x + col as f64 * (thumb_w + padding) + w / 2.0;
             let y = start_y; // All windows on same vertical line
 
-            self.windows.push(CanvasWindow {
-                x,
-                y,
-                w,
-                h,
-                thumb_index: src.thumb_index,
-                title: src.title.clone(),
-                icon: src.icon,
-                dragging: false,
-            });
+                        self.windows.push(CanvasWindow {
+                            x,
+                            y,
+                            w,
+                            h,
+                            thumb_index: src.thumb_index,
+                            title: src.title.clone(),
+                            title_utf16: src.title_utf16.clone(),
+                            icon: src.icon,
+                            dragging: false,
+                        });
         }
 
         // Apply saved zoom state, always center the canvas
