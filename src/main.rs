@@ -87,8 +87,6 @@ struct AppState {
     buf_bm: HBITMAP,
     // Cached icon GpBitmaps, rebuilt on each refresh() call
     icon_bitmaps: Vec<Option<*mut GpBitmap>>,
-    // Cached zoom indicator font
-    zoom_font: HFONT,
 }
 
 impl AppState {
@@ -119,7 +117,6 @@ impl AppState {
                 buf_dc: HDC::default(),
                 buf_bm: HBITMAP::default(),
                 icon_bitmaps: Vec::new(),
-                zoom_font: HFONT::default(),
             }
         }
 
@@ -146,12 +143,6 @@ impl AppState {
             SelectObject(self.buf_dc, self.buf_bm);
             let _ = ReleaseDC(None, screen_dc);
 
-            // Zoom indicator GDI font
-            let zoom_font_name = window::wide_string("Segoe UI");
-            self.zoom_font = CreateFontW(
-                24, 0, 0, 0, 300, 0, 0, 0, 0, 0, 0, 0, 0,
-                PCWSTR(zoom_font_name.as_ptr()),
-            );
         }
 
         unsafe fn free_render_resources(&mut self) {
@@ -183,10 +174,6 @@ impl AppState {
             if !self.buf_dc.is_invalid() {
                 let _ = DeleteDC(self.buf_dc);
                 self.buf_dc = HDC::default();
-            }
-            if !self.zoom_font.is_invalid() {
-                let _ = DeleteObject(self.zoom_font);
-                self.zoom_font = HFONT::default();
             }
         }
 
@@ -905,18 +892,6 @@ unsafe extern "system" fn wndproc(
                             let _ = DeleteDC(hdc_text);
                         }
                     }
-
-                    // Zoom indicator using cached font
-                    let zoom_text = format!("{:.0}%", s.canvas.zoom * 100.0);
-                    let mut zw: Vec<u16> = zoom_text.encode_utf16().collect();
-                    let of2 = SelectObject(s.buf_dc, s.zoom_font);
-                    SetTextColor(s.buf_dc, COLORREF(0x00808080));
-                    let mut zr = RECT {
-                        left: s.canvas.screen_w - 120, top: s.canvas.screen_h - 40,
-                        right: s.canvas.screen_w - 10, bottom: s.canvas.screen_h - 10,
-                    };
-                    DrawTextW(s.buf_dc, &mut zw, &mut zr, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-                    SelectObject(s.buf_dc, of2);
 
                     // Copy composed buffer to screen
                     let _ = BitBlt(

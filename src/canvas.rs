@@ -262,7 +262,7 @@ impl Canvas {
     pub fn zoom_at(&mut self, screen_x: f64, screen_y: f64, delta: f64) {
         let old_zoom = self.zoom;
         let zoom_factor = if delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
-        self.zoom = (self.zoom * zoom_factor).clamp(0.05, 10.0);
+        self.zoom = (self.zoom * zoom_factor).clamp(0.5, 10.0);
         let ratio = self.zoom / old_zoom;
         self.pan_x = screen_x - ratio * (screen_x - self.pan_x);
         self.pan_y = screen_y - ratio * (screen_y - self.pan_y);
