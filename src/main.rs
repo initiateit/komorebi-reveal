@@ -48,6 +48,86 @@ fn ease_out(t: f64) -> f64 {
     1.0 - (1.0 - t).powi(3)
 }
 
+fn query_komorebi_state() -> (Vec<Vec<Vec<isize>>>, Vec<Vec<String>>) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = match std::process::Command::new("komorebic")
+        .arg("state")
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let monitors = match json["monitors"]["elements"].as_array() {
+        Some(m) => m,
+        None => return (Vec::new(), Vec::new()),
+    };
+    let mut all_windows = Vec::new();
+    let mut all_names = Vec::new();
+    for monitor in monitors {
+        let workspaces = match monitor["workspaces"]["elements"].as_array() {
+            Some(w) => w,
+            None => { all_windows.push(Vec::new()); all_names.push(Vec::new()); continue; }
+        };
+        let mut mon_windows = Vec::new();
+        let mut mon_names = Vec::new();
+        for (wi, ws) in workspaces.iter().enumerate() {
+            let mut hwnds: Vec<isize> = Vec::new();
+            if let Some(containers) = ws["containers"]["elements"].as_array() {
+                for c in containers {
+                    if let Some(wins) = c["windows"]["elements"].as_array() {
+                        for w in wins {
+                            if let Some(h) = w["hwnd"].as_i64() { hwnds.push(h as isize); }
+                        }
+                    }
+                }
+            }
+            if let Some(floating) = ws["floating_windows"]["elements"].as_array() {
+                for w in floating {
+                    if let Some(h) = w["hwnd"].as_i64() { hwnds.push(h as isize); }
+                }
+            }
+            mon_windows.push(hwnds);
+            let name = ws["name"].as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| (wi + 1).to_string());
+            mon_names.push(name);
+        }
+        all_windows.push(mon_windows);
+        all_names.push(mon_names);
+    }
+    (all_windows, all_names)
+}
+
+fn workspace_box_rects(screen_w: i32, workspace_windows: &[Vec<Vec<isize>>]) -> Vec<(usize, usize, i32, i32, i32, i32)> {
+    let mon_w = 100i32; let mon_h = 36i32; let mon_gap = 12i32;
+    let top_y = 20i32;  let margin = 6i32;  let ws_gap = 4i32;
+    let n = workspace_windows.len();
+    if n == 0 { return Vec::new(); }
+    let total_w = n as i32 * mon_w + (n as i32 - 1) * mon_gap;
+    let start_x = (screen_w - total_w) / 2;
+    let mut out = Vec::new();
+    for (mi, workspaces) in workspace_windows.iter().enumerate() {
+        let mx = start_x + mi as i32 * (mon_w + mon_gap);
+        let ws_count = workspaces.len();
+        if ws_count == 0 { continue; }
+        let ws_h = mon_h - margin * 2;
+        let available = mon_w - margin * 2 - ws_gap * (ws_count as i32 - 1);
+        let ws_w = (available / ws_count as i32).max(1);
+        for wi in 0..ws_count {
+            let wx = mx + margin + wi as i32 * (ws_w + ws_gap);
+            let wy = top_y + margin;
+            out.push((mi, wi, wx, wy, ws_w, ws_h));
+        }
+    }
+    out
+}
+
 /// Simple debug logger
 fn log_debug(msg: &str) {
     let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
@@ -87,6 +167,17 @@ struct AppState {
     buf_bm: HBITMAP,
     // Cached icon GpBitmaps, rebuilt on each refresh() call
     icon_bitmaps: Vec<Option<*mut GpBitmap>>,
+    // Full source info list from last refresh(), used to re-layout after filter changes
+    cached_source_infos: Vec<canvas::SourceInfo>,
+    // Komorebi workspace state: [monitor][workspace] -> [hwnd], queried on show()
+    workspace_windows: Vec<Vec<Vec<isize>>>,
+    workspace_names: Vec<Vec<String>>,
+    selected_workspace: Option<(usize, usize)>,
+    thumbnail_hwnds: Vec<isize>,
+    // Small font for workspace label text inside indicator boxes
+    gp_label_font: *mut GpFont,
+    gp_label_brush: *mut GpSolidFill,
+    gp_label_format: *mut GpStringFormat,
 }
 
 impl AppState {
@@ -117,6 +208,14 @@ impl AppState {
                 buf_dc: HDC::default(),
                 buf_bm: HBITMAP::default(),
                 icon_bitmaps: Vec::new(),
+                cached_source_infos: Vec::new(),
+                workspace_windows: Vec::new(),
+                workspace_names: Vec::new(),
+                selected_workspace: None,
+                thumbnail_hwnds: Vec::new(),
+                gp_label_font: std::ptr::null_mut(),
+                gp_label_brush: std::ptr::null_mut(),
+                gp_label_format: std::ptr::null_mut(),
             }
         }
 
@@ -136,6 +235,14 @@ impl AppState {
             let _ = GdipSetStringFormatAlign(self.gp_format, StringAlignmentNear);
             let _ = GdipSetStringFormatLineAlign(self.gp_format, StringAlignmentCenter);
 
+            // Small font + format for workspace label text
+            let _ = GdipCreateFont(self.gp_font_family, 9.0, 1, UnitPixel, &mut self.gp_label_font);
+            let _ = GdipCreateSolidFill(0xCC242430, &mut self.gp_label_brush as *mut _ as *mut _);
+            let _ = GdipCreateStringFormat(0, 0, &mut self.gp_label_format);
+            let _ = GdipSetStringFormatTrimming(self.gp_label_format, StringTrimmingEllipsisCharacter);
+            let _ = GdipSetStringFormatAlign(self.gp_label_format, StringAlignmentCenter);
+            let _ = GdipSetStringFormatLineAlign(self.gp_label_format, StringAlignmentCenter);
+
             // Screen-sized back buffer — reused every frame instead of allocating per frame
             let screen_dc = GetDC(None);
             self.buf_dc = CreateCompatibleDC(screen_dc);
@@ -146,6 +253,18 @@ impl AppState {
         }
 
         unsafe fn free_render_resources(&mut self) {
+            if !self.gp_label_format.is_null() {
+                let _ = GdipDeleteStringFormat(self.gp_label_format);
+                self.gp_label_format = std::ptr::null_mut();
+            }
+            if !self.gp_label_brush.is_null() {
+                let _ = GdipDeleteBrush(self.gp_label_brush as *mut _ as *mut GpBrush);
+                self.gp_label_brush = std::ptr::null_mut();
+            }
+            if !self.gp_label_font.is_null() {
+                let _ = GdipDeleteFont(self.gp_label_font);
+                self.gp_label_font = std::ptr::null_mut();
+            }
             if !self.gp_format.is_null() {
                 let _ = GdipDeleteStringFormat(self.gp_format);
                 self.gp_format = std::ptr::null_mut();
@@ -251,6 +370,7 @@ impl AppState {
 
     fn refresh(&mut self) {
         self.thumbnails.clear();
+        self.thumbnail_hwnds.clear();
         self.canvas.windows.clear();
 
         let windows = enumerate::enumerate_windows();
@@ -274,6 +394,7 @@ impl AppState {
                                             icon: winfo.icon,
                                         });
                     self.thumbnails.push(thumb);
+                    self.thumbnail_hwnds.push(winfo.hwnd.0 as isize);
                 }
                 Err(e) => {
                     log_debug(&format!(
@@ -286,10 +407,38 @@ impl AppState {
 
         log_debug(&format!("Registered {} thumbnails", self.thumbnails.len()));
 
+        self.cached_source_infos = source_infos;
         let saved = state::load_state();
-        self.canvas.layout_grid(&source_infos, saved.as_ref());
+        self.canvas.layout_grid(&self.cached_source_infos, saved.as_ref());
         unsafe { self.rebuild_icon_bitmaps(); }
         self.update_all_thumbnails();
+    }
+
+    fn relayout_for_filter(&mut self) {
+        let zoom = self.canvas.zoom;
+        if self.selected_workspace.is_some() {
+            let visible: Vec<canvas::SourceInfo> = self.cached_source_infos.iter()
+                .filter(|si| self.is_thumb_visible(si.thumb_index))
+                .cloned()
+                .collect();
+            self.canvas.layout_grid(&visible, None);
+        } else {
+            self.canvas.layout_grid(&self.cached_source_infos, None);
+        }
+        self.canvas.zoom = zoom;
+        unsafe { self.rebuild_icon_bitmaps(); }
+        // Hide all thumbnails first; update_all_thumbnails() will re-show only the visible ones
+        for thumb in &self.thumbnails {
+            let _ = thumb.hide();
+        }
+        self.update_all_thumbnails();
+    }
+
+    fn is_thumb_visible(&self, thumb_index: usize) -> bool {
+        let Some((mon, ws)) = self.selected_workspace else { return true; };
+        let Some(ws_hwnds) = self.workspace_windows.get(mon).and_then(|m| m.get(ws)) else { return true; };
+        let hwnd = self.thumbnail_hwnds.get(thumb_index).copied().unwrap_or(0);
+        ws_hwnds.contains(&hwnd)
     }
 
     fn update_all_thumbnails(&self) {
@@ -302,6 +451,11 @@ impl AppState {
 
         for cw in &self.canvas.windows {
             if cw.thumb_index < self.thumbnails.len() {
+                if !self.is_thumb_visible(cw.thumb_index) {
+                    let _ = self.thumbnails[cw.thumb_index].hide();
+                    continue;
+                }
+
                 let rect = self.canvas.canvas_to_screen_rect(cw, scale);
                 if rect.right > 0
                     && rect.bottom > 0
@@ -342,6 +496,10 @@ impl AppState {
         self.current_alpha = 0;
         window::set_window_alpha(self.canvas_hwnd, 0);
 
+        let (ws_windows, ws_names) = query_komorebi_state();
+        self.workspace_windows = ws_windows;
+        self.workspace_names = ws_names;
+        self.selected_workspace = None;
         self.refresh();
         window::show_canvas(self.canvas_hwnd);
 
@@ -520,19 +678,38 @@ unsafe extern "system" fn wndproc(
 
         WM_LBUTTONDOWN => {
             let (x, y) = input::mouse_coords(lparam.0);
-            with_state(|s| {
-                let hit = s.canvas.hit_test(x, y);
-                s.click_target = hit;
-                s.drag_moved = false;
-                // Set active window and scroll to it
-                if let Some(idx) = hit {
-                    s.canvas.set_active_window(idx);
-                    unsafe {
-                        let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
+            // Check workspace indicator boxes before window hit-test
+            let consumed = with_state(|s| {
+                let boxes = workspace_box_rects(s.canvas.screen_w, &s.workspace_windows);
+                for &(mi, wi, bx, by, bw, bh) in &boxes {
+                    if x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64 {
+                        s.selected_workspace = if s.selected_workspace == Some((mi, wi)) {
+                            None
+                        } else {
+                            Some((mi, wi))
+                        };
+                        s.relayout_for_filter();
+                        unsafe { let _ = InvalidateRect(hwnd, None, true); }
+                        return true;
                     }
                 }
-                // Window dragging disabled - only canvas panning with right-click
-            });
+                false
+            }).unwrap_or(false);
+            if !consumed {
+                with_state(|s| {
+                    let hit = s.canvas.hit_test(x, y);
+                    s.click_target = hit;
+                    s.drag_moved = false;
+                    // Set active window and scroll to it
+                    if let Some(idx) = hit {
+                        s.canvas.set_active_window(idx);
+                        unsafe {
+                            let _ = SetTimer(hwnd, TIMER_SCROLL_ANIM, ANIM_INTERVAL_MS, None);
+                        }
+                    }
+                    // Window dragging disabled - only canvas panning with right-click
+                });
+            }
             LRESULT(0)
         }
 
@@ -655,6 +832,68 @@ unsafe extern "system" fn wndproc(
                         let _ = DeleteDC(hdc_mem);
                     }
 
+                    // Draw workspace/monitor indicator at top-center
+                    unsafe {
+                        let boxes = workspace_box_rects(s.canvas.screen_w, &s.workspace_windows);
+                        if !boxes.is_empty() {
+                            let mon_w = 100i32; let mon_h = 36i32;
+                            let mon_gap = 12i32; let top_y = 20i32;
+                            let n = s.workspace_windows.len();
+                            let total_w = n as i32 * mon_w + (n as i32 - 1) * mon_gap;
+                            let start_x = (s.canvas.screen_w - total_w) / 2;
+
+                            let mut g: *mut GpGraphics = std::ptr::null_mut();
+                            if GdipCreateFromHDC(s.buf_dc, &mut g as *mut _ as *mut _) == Status(0) {
+                                let _ = GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+
+                                // Monitor boxes
+                                for mi in 0..n {
+                                    let mx = start_x + mi as i32 * (mon_w + mon_gap);
+                                    let mut fill: *mut GpSolidFill = std::ptr::null_mut();
+                                    if GdipCreateSolidFill(0x55FFFFFF, &mut fill as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipFillRectangleI(g, fill as *mut _ as *mut GpBrush, mx, top_y, mon_w, mon_h);
+                                        let _ = GdipDeleteBrush(fill as *mut _ as *mut GpBrush);
+                                    }
+                                    let mut pen: *mut GpPen = std::ptr::null_mut();
+                                    if GdipCreatePen1(0xAAFFFFFF, 1.5, UnitPixel, &mut pen as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipDrawRectangleI(g, pen, mx, top_y, mon_w, mon_h);
+                                        let _ = GdipDeletePen(pen);
+                                    }
+                                }
+
+                                // Workspace sub-boxes (highlight selected) + labels
+                                for &(mi, wi, wx, wy, ws_w, ws_h) in &boxes {
+                                    let is_selected = s.selected_workspace == Some((mi, wi));
+                                    let fill_color = if is_selected { 0xBBFFFFFF } else { 0x88FFFFFF };
+                                    let pen_color  = if is_selected { 0xFFFFFFFF } else { 0xCCFFFFFF };
+                                    let pen_width  = if is_selected { 2.0f32 } else { 1.0f32 };
+
+                                    let mut wfill: *mut GpSolidFill = std::ptr::null_mut();
+                                    if GdipCreateSolidFill(fill_color, &mut wfill as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipFillRectangleI(g, wfill as *mut _ as *mut GpBrush, wx, wy, ws_w, ws_h);
+                                        let _ = GdipDeleteBrush(wfill as *mut _ as *mut GpBrush);
+                                    }
+                                    let mut wpen: *mut GpPen = std::ptr::null_mut();
+                                    if GdipCreatePen1(pen_color, pen_width, UnitPixel, &mut wpen as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipDrawRectangleI(g, wpen, wx, wy, ws_w, ws_h);
+                                        let _ = GdipDeletePen(wpen);
+                                    }
+
+                                    // Label text
+                                    if !s.gp_label_font.is_null() && !s.gp_label_brush.is_null() && !s.gp_label_format.is_null() {
+                                        if let Some(name) = s.workspace_names.get(mi).and_then(|m| m.get(wi)) {
+                                            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+                                            let label_rect = RectF { X: wx as f32, Y: wy as f32, Width: ws_w as f32, Height: ws_h as f32 };
+                                            let _ = GdipDrawString(g, PCWSTR(wide.as_ptr()), -1, s.gp_label_font, &label_rect, s.gp_label_format, s.gp_label_brush as *mut _ as *mut GpBrush);
+                                        }
+                                    }
+                                }
+
+                                let _ = GdipDeleteGraphics(g);
+                            }
+                        }
+                    }
+
                     let scale = if s.anim_active {
                         let t = s.anim_step as f64 / ANIM_STEPS as f64;
                         0.92 + 0.08 * ease_out(t)
@@ -669,6 +908,7 @@ unsafe extern "system" fn wndproc(
                             let _ = GdipSetSmoothingMode(border_g, SmoothingModeAntiAlias);
 
                             for (idx, cw) in s.canvas.windows.iter().enumerate() {
+                                if !s.is_thumb_visible(cw.thumb_index) { continue; }
                                 let rect = s.canvas.canvas_to_screen_rect(cw, scale);
                                 let is_active = s.canvas.get_active_window() == Some(idx);
 
@@ -783,6 +1023,7 @@ unsafe extern "system" fn wndproc(
                                 let _ = GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
 
                                 for (cw_idx, cw) in s.canvas.windows.iter().enumerate() {
+                                    if !s.is_thumb_visible(cw.thumb_index) { continue; }
                                     let rect = s.canvas.canvas_to_screen_rect(cw, scale);
                                     let icon_size = 20;
                                     let icon_spacing = 6;

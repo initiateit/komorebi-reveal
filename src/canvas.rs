@@ -10,6 +10,7 @@ use crate::state::SavedCanvasState;
 pub struct CanvasWindow { pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub thumb_index: usize, pub title: String, pub title_utf16: Vec<u16>, pub icon: HICON, pub dragging: bool, }
 
 /// Source window info for layout computation.
+#[derive(Clone)]
 pub struct SourceInfo { pub thumb_index: usize, pub width: i32, pub height: i32, pub title: String, pub title_utf16: Vec<u16>, pub icon: HICON, }
 
 /// The canvas state.
