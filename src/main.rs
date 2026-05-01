@@ -619,9 +619,13 @@ unsafe extern "system" fn wndproc(
                 with_state(|s| s.tick_text_animation());
             } else if wparam.0 == TIMER_SCROLL_ANIM {
                 with_state(|s| {
-                    if s.canvas.update_scroll_animation() {
-                        s.update_all_thumbnails();
-                        let _ = InvalidateRect(hwnd, None, true);
+                    let scroll_active = s.canvas.update_scroll_animation();
+                    let fade_active = s.canvas.update_card_fade();
+                    if scroll_active || fade_active {
+                        if scroll_active {
+                            s.update_all_thumbnails();
+                        }
+                        unsafe { let _ = InvalidateRect(hwnd, None, true); }
                     } else {
                         // Animation complete, kill timer
                         unsafe {
@@ -940,8 +944,11 @@ unsafe extern "system" fn wndproc(
                                         let _ = GdipClosePathFigure(path);
 
                                         if is_active {
+                                            let fade = s.canvas.card_fade_progress;
+                                            let eased_fade = 1.0 - (1.0 - fade).powi(3); // ease-out cubic
+
                                             let mut card_fill: *mut GpSolidFill = std::ptr::null_mut();
-                                            let opacity = 0x4D;
+                                            let opacity = (0x4D as f64 * eased_fade) as u32;
                                             if GdipCreateSolidFill((opacity << 24) | 0xFFFFFF, &mut card_fill as *mut _ as *mut _) == Status(0) {
                                                 let _ = GdipFillPath(border_g, card_fill as *mut _ as *mut GpBrush, path);
                                                 let _ = GdipDeleteBrush(card_fill as *mut _ as *mut GpBrush);
@@ -957,6 +964,7 @@ unsafe extern "system" fn wndproc(
                                         // 9-slice drop shadow
                                         if is_active && !(*addr_of!(SHADOW_IMAGE)).is_null() {
                                             let shadow = *addr_of!(SHADOW_IMAGE);
+
                                             let mt = 50.0f32;
                                             let ml = 50.0f32;
                                             let mr = 150.0f32;
@@ -974,9 +982,9 @@ unsafe extern "system" fn wndproc(
                                             let dy0 = y - d_mt;
                                             let dy1 = y;
                                             let dy2 = y + h;
-                                            let attr: *mut GpImageAttributes = std::ptr::null_mut();
+
                                             let draw_slice = |dx: f32, dy: f32, dw: f32, dh: f32, sx: f32, sy: f32, sw: f32, sh: f32| {
-                                                let _ = GdipDrawImageRectRect(border_g, shadow, dx, dy, dw, dh, sx, sy, sw, sh, UnitPixel, attr, 0isize as _, std::ptr::null_mut());
+                                                let _ = GdipDrawImageRectRect(border_g, shadow, dx, dy, dw, dh, sx, sy, sw, sh, UnitPixel, std::ptr::null_mut(), 0isize as _, std::ptr::null_mut());
                                             };
                                             draw_slice(dx0, dy0, d_ml, d_mt, 0.0, 0.0, ml, mt);
                                             draw_slice(dx1, dy0, w, d_mt, ml, 0.0, src_cx, mt);

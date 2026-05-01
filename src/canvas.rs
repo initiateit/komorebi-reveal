@@ -38,6 +38,8 @@ pub struct Canvas {
     scroll_start_pan: f64,
     scroll_target: f64,
     scroll_progress: f64,
+    pub card_fade_active: bool,
+    pub card_fade_progress: f64,
 }
 
 impl Canvas {
@@ -65,6 +67,8 @@ impl Canvas {
             scroll_start_pan: 0.0,
             scroll_target: 0.0,
             scroll_progress: 0.0,
+            card_fade_active: false,
+            card_fade_progress: 1.0,
         }
     }
 
@@ -132,6 +136,8 @@ impl Canvas {
                 Some(self.windows.len() / 2) // Middle window
             };
         }
+        self.card_fade_progress = 1.0;
+        self.card_fade_active = false;
     }
 
     /// Navigate to the next window (cycling)
@@ -142,6 +148,7 @@ impl Canvas {
         let current = self.active_window.unwrap_or(0);
         self.active_window = Some((current + 1) % self.windows.len());
         self.scroll_to_active_window();
+        self.start_card_fade();
     }
 
     /// Navigate to the previous window (cycling)
@@ -156,6 +163,7 @@ impl Canvas {
             current - 1
         });
         self.scroll_to_active_window();
+        self.start_card_fade();
     }
 
     /// Get the currently active window index
@@ -163,12 +171,29 @@ impl Canvas {
         self.active_window
     }
 
-    /// Set the active window by index and scroll to it
     pub fn set_active_window(&mut self, index: usize) {
         if index < self.windows.len() {
             self.active_window = Some(index);
             self.scroll_to_active_window();
+            self.start_card_fade();
         }
+    }
+
+    pub fn start_card_fade(&mut self) {
+        self.card_fade_active = true;
+        self.card_fade_progress = 0.0;
+    }
+
+    pub fn update_card_fade(&mut self) -> bool {
+        if !self.card_fade_active {
+            return false;
+        }
+        self.card_fade_progress += 0.05;
+        if self.card_fade_progress >= 1.0 {
+            self.card_fade_progress = 1.0;
+            self.card_fade_active = false;
+        }
+        true
     }
 
     /// Start smooth scroll animation to center the active window
@@ -199,11 +224,9 @@ impl Canvas {
                 let screen_center = self.screen_w as f64 / 2.0;
                 self.target_pan_x = screen_center - window.x * self.zoom;
 
-                // Start scroll animation
-                self.scroll_active = true;
-                self.scroll_start_pan = self.pan_x;
-                self.scroll_target = self.target_pan_x;
-                self.scroll_progress = 0.0;
+                // Make scroll instantaneous to fix DWM thumbnail lag
+                self.pan_x = self.target_pan_x;
+                self.scroll_active = false;
             }
         }
     }

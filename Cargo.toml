@@ -1,5 +1,5 @@
 [package]
-name = "win-canvas"
+name = "komorebi-reveal"
 version = "0.1.0"
 edition = "2021"
 description = "An infinite canvas for managing open windows with DWM thumbnails"
