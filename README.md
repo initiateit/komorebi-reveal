@@ -1,6 +1,6 @@
 # komorebi-reveal
 
-![Project Screenshot](https://github.com/initiateit/komorebi-reveal/blob/main/screenshot.png?raw=true)
+![Project Screenshot](https://github.com/initiateit/komorebi-reveal/blob/feature/workspace-indicator-workspace-window-filter/screenshot.png)
 
 This is a work in progress.
 
