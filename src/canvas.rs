@@ -7,25 +7,11 @@ use crate::state::SavedCanvasState;
 
 /// Represents a window's position and size on the canvas (in canvas-space coordinates).
 #[derive(Debug, Clone)]
-pub struct CanvasWindow {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-    pub thumb_index: usize,
-    pub title: String,
-    pub icon: HICON,
-    pub dragging: bool,
-}
+pub struct CanvasWindow { pub x: f64, pub y: f64, pub w: f64, pub h: f64, pub thumb_index: usize, pub title_utf16: Vec<u16>, pub icon: HICON, pub dragging: bool, }
 
 /// Source window info for layout computation.
-pub struct SourceInfo {
-    pub thumb_index: usize,
-    pub width: i32,
-    pub height: i32,
-    pub title: String,
-    pub icon: HICON,
-}
+#[derive(Clone)]
+pub struct SourceInfo { pub thumb_index: usize, pub width: i32, pub height: i32, pub title_utf16: Vec<u16>, pub icon: HICON, }
 
 /// The canvas state.
 pub struct Canvas {
@@ -52,6 +38,8 @@ pub struct Canvas {
     scroll_start_pan: f64,
     scroll_target: f64,
     scroll_progress: f64,
+    pub card_fade_active: bool,
+    pub card_fade_progress: f64,
 }
 
 impl Canvas {
@@ -79,6 +67,8 @@ impl Canvas {
             scroll_start_pan: 0.0,
             scroll_target: 0.0,
             scroll_progress: 0.0,
+            card_fade_active: false,
+            card_fade_progress: 1.0,
         }
     }
 
@@ -112,16 +102,16 @@ impl Canvas {
             let x = start_x + col as f64 * (thumb_w + padding) + w / 2.0;
             let y = start_y; // All windows on same vertical line
 
-            self.windows.push(CanvasWindow {
-                x,
-                y,
-                w,
-                h,
-                thumb_index: src.thumb_index,
-                title: src.title.clone(),
-                icon: src.icon,
-                dragging: false,
-            });
+                        self.windows.push(CanvasWindow {
+                            x,
+                            y,
+                            w,
+                            h,
+                            thumb_index: src.thumb_index,
+                            title_utf16: src.title_utf16.clone(),
+                            icon: src.icon,
+                            dragging: false,
+                        });
         }
 
         // Apply saved zoom state, always center the canvas
@@ -145,6 +135,8 @@ impl Canvas {
                 Some(self.windows.len() / 2) // Middle window
             };
         }
+        self.card_fade_progress = 1.0;
+        self.card_fade_active = false;
     }
 
     /// Navigate to the next window (cycling)
@@ -155,6 +147,7 @@ impl Canvas {
         let current = self.active_window.unwrap_or(0);
         self.active_window = Some((current + 1) % self.windows.len());
         self.scroll_to_active_window();
+        self.start_card_fade();
     }
 
     /// Navigate to the previous window (cycling)
@@ -169,6 +162,7 @@ impl Canvas {
             current - 1
         });
         self.scroll_to_active_window();
+        self.start_card_fade();
     }
 
     /// Get the currently active window index
@@ -176,12 +170,29 @@ impl Canvas {
         self.active_window
     }
 
-    /// Set the active window by index and scroll to it
     pub fn set_active_window(&mut self, index: usize) {
         if index < self.windows.len() {
             self.active_window = Some(index);
             self.scroll_to_active_window();
+            self.start_card_fade();
         }
+    }
+
+    pub fn start_card_fade(&mut self) {
+        self.card_fade_active = true;
+        self.card_fade_progress = 0.0;
+    }
+
+    pub fn update_card_fade(&mut self) -> bool {
+        if !self.card_fade_active {
+            return false;
+        }
+        self.card_fade_progress += 0.05;
+        if self.card_fade_progress >= 1.0 {
+            self.card_fade_progress = 1.0;
+            self.card_fade_active = false;
+        }
+        true
     }
 
     /// Start smooth scroll animation to center the active window
@@ -212,11 +223,9 @@ impl Canvas {
                 let screen_center = self.screen_w as f64 / 2.0;
                 self.target_pan_x = screen_center - window.x * self.zoom;
 
-                // Start scroll animation
-                self.scroll_active = true;
-                self.scroll_start_pan = self.pan_x;
-                self.scroll_target = self.target_pan_x;
-                self.scroll_progress = 0.0;
+                // Make scroll instantaneous to fix DWM thumbnail lag
+                self.pan_x = self.target_pan_x;
+                self.scroll_active = false;
             }
         }
     }
@@ -276,7 +285,7 @@ impl Canvas {
     pub fn zoom_at(&mut self, screen_x: f64, screen_y: f64, delta: f64) {
         let old_zoom = self.zoom;
         let zoom_factor = if delta > 0.0 { 1.15 } else { 1.0 / 1.15 };
-        self.zoom = (self.zoom * zoom_factor).clamp(0.05, 10.0);
+        self.zoom = (self.zoom * zoom_factor).clamp(0.5, 10.0);
         let ratio = self.zoom / old_zoom;
         self.pan_x = screen_x - ratio * (screen_x - self.pan_x);
         self.pan_y = screen_y - ratio * (screen_y - self.pan_y);

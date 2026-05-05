@@ -32,3 +32,6 @@ target
 # Internal documentation and scratchpad
 CHANGELOG.md
 README.md
+SEC_AUDIT.md
+PERF_AUDIT.md
+UTF16_OPTIMIZATION_PLAN.md
