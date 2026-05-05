@@ -5,6 +5,7 @@ edition = "2021"
 description = "An infinite canvas for managing open windows with DWM thumbnails"
 
 [dependencies]
+resvg = "0.47.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

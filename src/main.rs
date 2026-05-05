@@ -104,29 +104,6 @@ fn query_komorebi_state() -> (Vec<Vec<Vec<isize>>>, Vec<Vec<String>>) {
     (all_windows, all_names)
 }
 
-fn workspace_box_rects(screen_w: i32, workspace_windows: &[Vec<Vec<isize>>]) -> Vec<(usize, usize, i32, i32, i32, i32)> {
-    let mon_w = 100i32; let mon_h = 36i32; let mon_gap = 12i32;
-    let top_y = 20i32;  let margin = 6i32;  let ws_gap = 4i32;
-    let n = workspace_windows.len();
-    if n == 0 { return Vec::new(); }
-    let total_w = n as i32 * mon_w + (n as i32 - 1) * mon_gap;
-    let start_x = (screen_w - total_w) / 2;
-    let mut out = Vec::new();
-    for (mi, workspaces) in workspace_windows.iter().enumerate() {
-        let mx = start_x + mi as i32 * (mon_w + mon_gap);
-        let ws_count = workspaces.len();
-        if ws_count == 0 { continue; }
-        let ws_h = mon_h - margin * 2;
-        let available = mon_w - margin * 2 - ws_gap * (ws_count as i32 - 1);
-        let ws_w = (available / ws_count as i32).max(1);
-        for wi in 0..ws_count {
-            let wx = mx + margin + wi as i32 * (ws_w + ws_gap);
-            let wy = top_y + margin;
-            out.push((mi, wi, wx, wy, ws_w, ws_h));
-        }
-    }
-    out
-}
 
 /// Simple debug logger
 fn log_debug(msg: &str) {
@@ -139,6 +116,43 @@ fn log_debug(msg: &str) {
     }
     #[cfg(debug_assertions)]
     eprintln!("{}", msg);
+}
+
+unsafe fn load_embedded_svg_icon(svg_data: &[u8], size: u32, fill_color: Option<&str>) -> *mut GpImage {
+    use resvg::usvg::{Options, Tree};
+    use resvg::tiny_skia::Pixmap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    
+    static SVG_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    
+    let opt = Options::default();
+    
+    let mut svg_string = String::from_utf8_lossy(svg_data).to_string();
+    if let Some(color) = fill_color {
+        svg_string = svg_string.replace("#1f1f1f", color);
+    }
+    
+    if let Ok(tree) = Tree::from_data(svg_string.as_bytes(), &opt) {
+        if let Some(mut pixmap) = Pixmap::new(size, size) {
+            let view_box = tree.size();
+            let scale = size as f32 / view_box.width().max(view_box.height());
+            let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+            resvg::render(&tree, transform, &mut pixmap.as_mut());
+            
+            let id = SVG_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+            let temp_png = std::path::PathBuf::from(&appdata).join("win-canvas").join(format!("temp_icon_{}.png", id));
+            
+            if pixmap.save_png(&temp_png).is_ok() {
+                let mut img: *mut GpImage = std::ptr::null_mut();
+                let wide_path = window::wide_string(&temp_png.to_string_lossy());
+                if GdipLoadImageFromFile(PCWSTR(wide_path.as_ptr()), &mut img) == Status(0) {
+                    return img;
+                }
+            }
+        }
+    }
+    std::ptr::null_mut()
 }
 
 struct AppState {
@@ -159,6 +173,8 @@ struct AppState {
     // Cached GDI+ text rendering resources (created once, freed on shutdown)
     gp_font_family: *mut GpFontFamily,
     gp_font: *mut GpFont,
+    gp_icon_font_family: *mut GpFontFamily,
+    gp_icon_font: *mut GpFont,
     gp_text_brush: *mut GpSolidFill,
     gp_pill_brush: *mut GpSolidFill,
     gp_format: *mut GpStringFormat,
@@ -178,6 +194,10 @@ struct AppState {
     gp_label_font: *mut GpFont,
     gp_label_brush: *mut GpSolidFill,
     gp_label_format: *mut GpStringFormat,
+    gp_mon_icons: [*mut GpImage; 6],
+    gp_line_icon: *mut GpImage,
+    gp_ws_active_icons: [*mut GpImage; 9],
+    gp_ws_inactive_icons: [*mut GpImage; 9],
 }
 
 impl AppState {
@@ -202,6 +222,8 @@ impl AppState {
                 last_frame_time: Instant::now(),
                 gp_font_family: std::ptr::null_mut(),
                 gp_font: std::ptr::null_mut(),
+                gp_icon_font_family: std::ptr::null_mut(),
+                gp_icon_font: std::ptr::null_mut(),
                 gp_text_brush: std::ptr::null_mut(),
                 gp_pill_brush: std::ptr::null_mut(),
                 gp_format: std::ptr::null_mut(),
@@ -216,6 +238,10 @@ impl AppState {
                 gp_label_font: std::ptr::null_mut(),
                 gp_label_brush: std::ptr::null_mut(),
                 gp_label_format: std::ptr::null_mut(),
+                gp_mon_icons: [std::ptr::null_mut(); 6],
+                gp_line_icon: std::ptr::null_mut(),
+                gp_ws_active_icons: [std::ptr::null_mut(); 9],
+                gp_ws_inactive_icons: [std::ptr::null_mut(); 9],
             }
         }
 
@@ -228,6 +254,14 @@ impl AppState {
                 &mut self.gp_font_family,
             );
             let _ = GdipCreateFont(self.gp_font_family, 15.0, 1, UnitPixel, &mut self.gp_font);
+
+            let icon_font_name = window::wide_string("Segoe Fluent Icons");
+            let _ = GdipCreateFontFamilyFromName(
+                PCWSTR(icon_font_name.as_ptr()),
+                std::ptr::null_mut(),
+                &mut self.gp_icon_font_family,
+            );
+            let _ = GdipCreateFont(self.gp_icon_font_family, 15.0, 1, UnitPixel, &mut self.gp_icon_font);
             let _ = GdipCreateSolidFill(0xE6242430, &mut self.gp_text_brush as *mut _ as *mut _);
             let _ = GdipCreateSolidFill(0xFFE5E7EB, &mut self.gp_pill_brush as *mut _ as *mut _);
             let _ = GdipCreateStringFormat(0, 0, &mut self.gp_format);
@@ -242,6 +276,44 @@ impl AppState {
             let _ = GdipSetStringFormatTrimming(self.gp_label_format, StringTrimmingEllipsisCharacter);
             let _ = GdipSetStringFormatAlign(self.gp_label_format, StringAlignmentCenter);
             let _ = GdipSetStringFormatLineAlign(self.gp_label_format, StringAlignmentCenter);
+            
+            self.gp_mon_icons = [
+                load_embedded_svg_icon(include_bytes!("assets/f1_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/f2_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/f3_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/f4_f.svg"), 24, None),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ];
+            
+            // Apply a simple 90deg rotation to the SVG path for line.svg
+            let line_bytes = include_bytes!("assets/line.svg");
+            let mut line_str = String::from_utf8_lossy(line_bytes).to_string();
+            line_str = line_str.replace("<path ", "<path transform=\"rotate(90 480 -480)\" ");
+            self.gp_line_icon = load_embedded_svg_icon(line_str.as_bytes(), 24, None);
+
+            self.gp_ws_active_icons = [
+                load_embedded_svg_icon(include_bytes!("assets/l1_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l2_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l3_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l4_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l5_f.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l6_f.svg"), 24, None),
+                std::ptr::null_mut(), // l7 missing
+                std::ptr::null_mut(), // l8 missing
+                std::ptr::null_mut(), // l9 missing
+            ];
+            self.gp_ws_inactive_icons = [
+                load_embedded_svg_icon(include_bytes!("assets/l1_o.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l2_o.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l3_o.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l4_o.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l5_o.svg"), 24, None),
+                load_embedded_svg_icon(include_bytes!("assets/l6_o.svg"), 24, None),
+                std::ptr::null_mut(), // l7 missing
+                std::ptr::null_mut(), // l8 missing
+                std::ptr::null_mut(), // l9 missing
+            ];
 
             // Screen-sized back buffer — reused every frame instead of allocating per frame
             let screen_dc = GetDC(None);
@@ -285,6 +357,24 @@ impl AppState {
                 let _ = GdipDeleteFontFamily(self.gp_font_family);
                 self.gp_font_family = std::ptr::null_mut();
             }
+            if !self.gp_icon_font.is_null() {
+                let _ = GdipDeleteFont(self.gp_icon_font);
+                self.gp_icon_font = std::ptr::null_mut();
+            }
+            if !self.gp_icon_font_family.is_null() {
+                let _ = GdipDeleteFontFamily(self.gp_icon_font_family);
+                self.gp_icon_font_family = std::ptr::null_mut();
+            }
+            for img in self.gp_mon_icons.iter_mut() {
+                if !img.is_null() {
+                    let _ = GdipDisposeImage(*img);
+                    *img = std::ptr::null_mut();
+                }
+            }
+            if !self.gp_line_icon.is_null() {
+                let _ = GdipDisposeImage(self.gp_line_icon);
+                self.gp_line_icon = std::ptr::null_mut();
+            }
             self.free_icon_bitmaps();
             if !self.buf_bm.is_invalid() {
                 let _ = DeleteObject(self.buf_bm);
@@ -313,10 +403,8 @@ impl AppState {
         }
 
         unsafe fn free_icon_bitmaps(&mut self) {
-            for bm in self.icon_bitmaps.drain(..) {
-                if let Some(ptr) = bm {
-                    let _ = GdipDisposeImage(ptr as *mut _ as *mut GpImage);
-                }
+            for ptr in self.icon_bitmaps.drain(..).flatten() {
+                let _ = GdipDisposeImage(ptr as *mut _ as *mut GpImage);
             }
         }
     
@@ -333,10 +421,6 @@ impl AppState {
             self.refresh_rate_hz >= 120
         }
     
-            fn frame_budget_ms(&self) -> f64 {
-                1000.0 / self.refresh_rate_hz as f64
-            }
-        
             fn should_render_frame(&self) -> bool {
                 // Always render during animations
                 if self.anim_active || self.text_anim_active {
@@ -389,7 +473,6 @@ impl AppState {
                                             thumb_index: idx,
                                             width: thumb.source_width,
                                             height: thumb.source_height,
-                                            title: winfo.title.clone(),
                                             title_utf16: winfo.title.encode_utf16().chain(std::iter::once(0)).collect(),
                                             icon: winfo.icon,
                                         });
@@ -684,18 +767,57 @@ unsafe extern "system" fn wndproc(
             let (x, y) = input::mouse_coords(lparam.0);
             // Check workspace indicator boxes before window hit-test
             let consumed = with_state(|s| {
-                let boxes = workspace_box_rects(s.canvas.screen_w, &s.workspace_windows);
-                for &(mi, wi, bx, by, bw, bh) in &boxes {
-                    if x >= bx as f64 && x < (bx + bw) as f64 && y >= by as f64 && y < (by + bh) as f64 {
-                        s.selected_workspace = if s.selected_workspace == Some((mi, wi)) {
-                            None
-                        } else {
-                            Some((mi, wi))
-                        };
-                        s.relayout_for_filter();
-                        unsafe { let _ = InvalidateRect(hwnd, None, true); }
-                        return true;
+                // Mirror the exact pill layout math from WM_PAINT
+                let top_y = 50.0f64;
+                let icon_size = 24.0f64;
+                let spacing = 10.0f64;
+                let sep_spacing = 4.0f64;
+                let padding = 14.0f64;
+                let pill_h = 36.0f64;
+                let pill_gap = 16.0f64;
+                let n = s.workspace_windows.len();
+                if n == 0 { return false; }
+
+                let mut pill_widths = Vec::new();
+                let mut total_w = 0.0f64;
+                for mi in 0..n {
+                    let ws_count = s.workspace_windows[mi].len() as f64;
+                    let pw = padding + icon_size + sep_spacing + icon_size + sep_spacing
+                           + (ws_count * icon_size) + ((ws_count - 1.0).max(0.0) * spacing) + padding;
+                    pill_widths.push(pw);
+                    total_w += pw;
+                }
+                total_w += (n as f64 - 1.0) * pill_gap;
+
+                let mut current_x = (s.canvas.screen_w as f64 - total_w) / 2.0;
+
+                for mi in 0..n {
+                    let pw = pill_widths[mi];
+                    let px = current_x;
+                    let py = top_y;
+
+                    // Only check if click is inside this pill's vertical band
+                    if y >= py && y < py + pill_h {
+                        // The workspace icons start after: padding + mon_icon + sep + line + sep
+                        let ws_start_x = px + padding + icon_size + sep_spacing + icon_size + sep_spacing;
+                        let ws_count = s.workspace_windows[mi].len();
+
+                        for wi in 0..ws_count {
+                            let wx = ws_start_x + wi as f64 * (icon_size + spacing);
+                            if x >= wx && x < wx + icon_size {
+                                s.selected_workspace = if s.selected_workspace == Some((mi, wi)) {
+                                    None
+                                } else {
+                                    Some((mi, wi))
+                                };
+                                s.relayout_for_filter();
+                                unsafe { let _ = InvalidateRect(hwnd, None, true); }
+                                return true;
+                            }
+                        }
                     }
+
+                    current_x += pw + pill_gap;
                 }
                 false
             }).unwrap_or(false);
@@ -836,61 +958,132 @@ unsafe extern "system" fn wndproc(
                         let _ = DeleteDC(hdc_mem);
                     }
 
-                    // Draw workspace/monitor indicator at top-center
+                    // Draw full width rectangle and workspace/monitor indicator at top-center
                     unsafe {
-                        let boxes = workspace_box_rects(s.canvas.screen_w, &s.workspace_windows);
-                        if !boxes.is_empty() {
-                            let mon_w = 100i32; let mon_h = 36i32;
-                            let mon_gap = 12i32; let top_y = 20i32;
+                        let mut g: *mut GpGraphics = std::ptr::null_mut();
+                        if GdipCreateFromHDC(s.buf_dc, &mut g as *mut _ as *mut _) == Status(0) {
+                            let _ = GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+
                             let n = s.workspace_windows.len();
-                            let total_w = n as i32 * mon_w + (n as i32 - 1) * mon_gap;
-                            let start_x = (s.canvas.screen_w - total_w) / 2;
+                            if n > 0 {
+                                let top_y = 50.0f32;
+                                let icon_size = 24.0f32;
+                                let spacing = 10.0f32;    // gap between workspace icons
+                                let sep_spacing = 4.0f32; // gap around the line divider
+                                let padding = 14.0f32;
+                                let pill_h = 36.0f32;
+                                let pill_gap = 16.0f32;
 
-                            let mut g: *mut GpGraphics = std::ptr::null_mut();
-                            if GdipCreateFromHDC(s.buf_dc, &mut g as *mut _ as *mut _) == Status(0) {
-                                let _ = GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
-
-                                // Monitor boxes
+                                // Calculate total width of all pills to center them
+                                let mut pill_widths = Vec::new();
+                                let mut total_w = 0.0f32;
                                 for mi in 0..n {
-                                    let mx = start_x + mi as i32 * (mon_w + mon_gap);
-                                    let mut fill: *mut GpSolidFill = std::ptr::null_mut();
-                                    if GdipCreateSolidFill(0x55FFFFFF, &mut fill as *mut _ as *mut _) == Status(0) {
-                                        let _ = GdipFillRectangleI(g, fill as *mut _ as *mut GpBrush, mx, top_y, mon_w, mon_h);
-                                        let _ = GdipDeleteBrush(fill as *mut _ as *mut GpBrush);
+                                    let ws_count = s.workspace_windows[mi].len() as f32;
+                                    let pw = padding + icon_size + sep_spacing + icon_size + sep_spacing + (ws_count * icon_size) + ((ws_count - 1.0).max(0.0) * spacing) + padding;
+                                    pill_widths.push(pw);
+                                    total_w += pw;
+                                }
+                                total_w += (n as f32 - 1.0) * pill_gap;
+                                
+                                let current_x = (s.canvas.screen_w as f32 - total_w) / 2.0;
+
+                                // Draw container rounded rect that tightly wraps all pills
+                                let container_pad = 10.0f32;
+                                let cx = current_x - container_pad;
+                                let cy = top_y - container_pad;
+                                let cw = total_w + container_pad * 2.0;
+                                let ch = pill_h + container_pad * 2.0;
+                                let cr = 20.0f32;
+                                
+                                let mut container_path: *mut GpPath = std::ptr::null_mut();
+                                if GdipCreatePath(FillModeAlternate, &mut container_path as *mut _ as *mut _) == Status(0) {
+                                    let x2 = cx + cw;
+                                    let y2 = cy + ch;
+                                    let _ = GdipAddPathArc(container_path, x2 - 2.0 * cr, cy, 2.0 * cr, 2.0 * cr, 270.0, 90.0);
+                                    let _ = GdipAddPathLine(container_path, x2, cy + cr, x2, y2 - cr);
+                                    let _ = GdipAddPathArc(container_path, x2 - 2.0 * cr, y2 - 2.0 * cr, 2.0 * cr, 2.0 * cr, 0.0, 90.0);
+                                    let _ = GdipAddPathLine(container_path, x2 - cr, y2, cx + cr, y2);
+                                    let _ = GdipAddPathArc(container_path, cx, y2 - 2.0 * cr, 2.0 * cr, 2.0 * cr, 90.0, 90.0);
+                                    let _ = GdipAddPathLine(container_path, cx, y2 - cr, cx, cy + cr);
+                                    let _ = GdipAddPathArc(container_path, cx, cy, 2.0 * cr, 2.0 * cr, 180.0, 90.0);
+                                    let _ = GdipAddPathLine(container_path, cx + cr, cy, x2 - cr, cy);
+                                    let _ = GdipClosePathFigure(container_path);
+
+                                    // Fill
+                                    let mut container_fill: *mut GpSolidFill = std::ptr::null_mut();
+                                    if GdipCreateSolidFill(0x26FFFFFF, &mut container_fill as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipFillPath(g, container_fill as *mut _ as *mut GpBrush, container_path);
+                                        let _ = GdipDeleteBrush(container_fill as *mut _ as *mut GpBrush);
                                     }
-                                    let mut pen: *mut GpPen = std::ptr::null_mut();
-                                    if GdipCreatePen1(0xAAFFFFFF, 1.5, UnitPixel, &mut pen as *mut _ as *mut _) == Status(0) {
-                                        let _ = GdipDrawRectangleI(g, pen, mx, top_y, mon_w, mon_h);
-                                        let _ = GdipDeletePen(pen);
+                                    // Border
+                                    let mut container_pen: *mut GpPen = std::ptr::null_mut();
+                                    if GdipCreatePen1(0x33FFFFFF, 1.0, UnitPixel, &mut container_pen as *mut _ as *mut _) == Status(0) {
+                                        let _ = GdipDrawPath(g, container_pen, container_path);
+                                        let _ = GdipDeletePen(container_pen);
                                     }
+                                    let _ = GdipDeletePath(container_path);
                                 }
 
-                                // Workspace sub-boxes (highlight selected) + labels
-                                for &(mi, wi, wx, wy, ws_w, ws_h) in &boxes {
-                                    let is_selected = s.selected_workspace == Some((mi, wi));
-                                    let fill_color = if is_selected { 0xBBFFFFFF } else { 0x88FFFFFF };
-                                    let pen_color  = if is_selected { 0xFFFFFFFF } else { 0xCCFFFFFF };
-                                    let pen_width  = if is_selected { 2.0f32 } else { 1.0f32 };
+                                let mut current_x = current_x;
 
-                                    let mut wfill: *mut GpSolidFill = std::ptr::null_mut();
-                                    if GdipCreateSolidFill(fill_color, &mut wfill as *mut _ as *mut _) == Status(0) {
-                                        let _ = GdipFillRectangleI(g, wfill as *mut _ as *mut GpBrush, wx, wy, ws_w, ws_h);
-                                        let _ = GdipDeleteBrush(wfill as *mut _ as *mut GpBrush);
-                                    }
-                                    let mut wpen: *mut GpPen = std::ptr::null_mut();
-                                    if GdipCreatePen1(pen_color, pen_width, UnitPixel, &mut wpen as *mut _ as *mut _) == Status(0) {
-                                        let _ = GdipDrawRectangleI(g, wpen, wx, wy, ws_w, ws_h);
-                                        let _ = GdipDeletePen(wpen);
-                                    }
+                                for mi in 0..n {
+                                    let pw = pill_widths[mi];
+                                    let px = current_x;
+                                    let py = top_y;
+                                    
+                                    // Draw Pill Background
+                                    let mut pill_path: *mut GpPath = std::ptr::null_mut();
+                                    if GdipCreatePath(FillModeAlternate, &mut pill_path as *mut _ as *mut _) == Status(0) {
+                                        let r = 12.0f32;
+                                        let x2 = px + pw;
+                                        let y2 = py + pill_h;
+                                        let _ = GdipAddPathArc(pill_path, x2 - 2.0 * r, py, 2.0 * r, 2.0 * r, 270.0, 90.0);
+                                        let _ = GdipAddPathLine(pill_path, x2, py + r, x2, y2 - r);
+                                        let _ = GdipAddPathArc(pill_path, x2 - 2.0 * r, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 0.0, 90.0);
+                                        let _ = GdipAddPathLine(pill_path, x2 - r, y2, px + r, y2);
+                                        let _ = GdipAddPathArc(pill_path, px, y2 - 2.0 * r, 2.0 * r, 2.0 * r, 90.0, 90.0);
+                                        let _ = GdipAddPathLine(pill_path, px, y2 - r, px, py + r);
+                                        let _ = GdipAddPathArc(pill_path, px, py, 2.0 * r, 2.0 * r, 180.0, 90.0);
+                                        let _ = GdipAddPathLine(pill_path, px + r, py, x2 - r, py);
+                                        let _ = GdipClosePathFigure(pill_path);
 
-                                    // Label text
-                                    if !s.gp_label_font.is_null() && !s.gp_label_brush.is_null() && !s.gp_label_format.is_null() {
-                                        if let Some(name) = s.workspace_names.get(mi).and_then(|m| m.get(wi)) {
-                                            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-                                            let label_rect = RectF { X: wx as f32, Y: wy as f32, Width: ws_w as f32, Height: ws_h as f32 };
-                                            let _ = GdipDrawString(g, PCWSTR(wide.as_ptr()), -1, s.gp_label_font, &label_rect, s.gp_label_format, s.gp_label_brush as *mut _ as *mut GpBrush);
+                                        if !s.gp_pill_brush.is_null() {
+                                            let _ = GdipFillPath(g, s.gp_pill_brush as *mut _ as *mut GpBrush, pill_path);
                                         }
+                                        let _ = GdipDeletePath(pill_path);
                                     }
+
+                                    // Draw Monitor Icon
+                                    let icon_y = py + (pill_h - icon_size) / 2.0;
+                                    let mut draw_x = px + padding;
+                                    let mon_icon = s.gp_mon_icons.get(mi).copied().unwrap_or(std::ptr::null_mut());
+                                    if !mon_icon.is_null() {
+                                        let _ = GdipDrawImageRectI(g, mon_icon, draw_x as i32, icon_y as i32, icon_size as i32, icon_size as i32);
+                                    }
+                                    draw_x += icon_size + sep_spacing;
+
+                                    // Draw Line Icon
+                                    if !s.gp_line_icon.is_null() {
+                                        let _ = GdipDrawImageRectI(g, s.gp_line_icon, draw_x as i32, icon_y as i32, icon_size as i32, icon_size as i32);
+                                    }
+                                    draw_x += icon_size + sep_spacing;
+
+                                    // Draw Workspace Icons
+                                    let ws_count = s.workspace_windows[mi].len();
+                                    for wi in 0..ws_count {
+                                        let is_selected = s.selected_workspace == Some((mi, wi));
+                                        let ws_icon = if is_selected {
+                                            s.gp_ws_active_icons.get(wi).copied().unwrap_or(std::ptr::null_mut())
+                                        } else {
+                                            s.gp_ws_inactive_icons.get(wi).copied().unwrap_or(std::ptr::null_mut())
+                                        };
+                                        if !ws_icon.is_null() {
+                                            let _ = GdipDrawImageRectI(g, ws_icon, draw_x as i32, icon_y as i32, icon_size as i32, icon_size as i32);
+                                        }
+                                        draw_x += icon_size + spacing;
+                                    }
+
+                                    current_x += pw + pill_gap;
                                 }
 
                                 let _ = GdipDeleteGraphics(g);
