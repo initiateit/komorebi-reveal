@@ -4,6 +4,8 @@
 
 This is a work in progress.
 
+#### I am actively working towards objects being customised through the komorebi.json file
+
 Using https://github.com/YoGoUrT20/win-canvas as the base for devlopement it is an Alt+Tab replacement for Komorebi with specific integration for Komorebi/c exposed commands.
 
 #### Featureset (more info coming soon)
